@@ -152,6 +152,56 @@ _blockGetWeight(struct SVramBlock * block)
 }
 
 //---------------------------------------------------------------------------
+// Phase 1: only evict blocks not yet bound this frame (iUseCount == 0).
+// In hires mode the whole queue (including inline uploads) is replayed once
+// per pass; evicting a texture that was already bound this frame lets a later
+// upload overwrite it before the remaining passes read it.
+// Returns NULL without touching anything if that cannot make room.
+static inline struct SVramBlock *
+_blockAllocUnusedThisFrame(unsigned int size)
+{
+	struct SVramBlock * block;
+	unsigned int run = 0;
+	unsigned int weight = 0;
+	int fits = 0;
+
+	for (block = __head; block != NULL; block = block->pNext) {
+		if ((block->tex == NULL) || (block->iUseCount == 0)) {
+			run += block->iSize;
+			if (run >= size) {
+				fits = 1;
+				break;
+			}
+		}
+		else
+			run = 0;
+	}
+
+	if (!fits)
+		return NULL;
+
+	for (;;) {
+		int left = 0;
+
+		for (block = __head; block != NULL; block = block->pNext) {
+			if ((block->tex == NULL) || (block->iUseCount != 0))
+				continue;
+			if (_blockGetWeight(block) <= weight) {
+				block->tex = NULL;
+				block = _blockMergeFree(block);
+				if (block->iSize >= size)
+					return block;
+			}
+			else
+				left = 1;
+		}
+		if (!left)
+			return NULL;
+		weight++;
+	}
+}
+
+//---------------------------------------------------------------------------
 // Simple block allocator
 static inline struct SVramBlock *
 _blockAlloc(unsigned int size)
@@ -166,6 +216,10 @@ _blockAlloc(unsigned int size)
 			break;
 		}
 	}
+
+	// Prefer not to evict textures already bound this frame
+	if (block == NULL)
+		block = _blockAllocUnusedThisFrame(size);
 
 	while (block == NULL) {
 		// Free blocks starting with the least used textures
